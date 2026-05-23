@@ -20,6 +20,11 @@
  *    distribution.
  */
 
+/*
+ * Modificações e melhorias por: https://github.com/olucasmf (PT-BR)
+ * Modifications and improvements by: https://github.com/olucasmf (EN)
+ */
+
 using System;
 using System.Collections.Generic;
 using System.ComponentModel;
@@ -31,6 +36,10 @@ using System.Net;
 using System.Windows.Forms;
 using static SAM.Game.InvariantShorthand;
 using APITypes = SAM.API.Types;
+using System.Threading.Tasks;
+using System.Threading;
+using SAM.Game.Stats;
+using Timer = System.Windows.Forms.Timer;
 
 namespace SAM.Game
 {
@@ -50,11 +59,140 @@ namespace SAM.Game
 
         private readonly API.Callbacks.UserStatsReceived _UserStatsReceivedCallback;
 
-        //private API.Callback<APITypes.UserStatsStored> UserStatsStoredCallback;
+        private readonly ToolStripProgressBar _ProgressBar;
+        private readonly ToolStripLabel _UnlockCountdownLabel;
+
+        private readonly ToolStripLabel _AutoUnlockLabel;
+        private readonly ToolStripControlHost _AutoUnlockTimeHost;
+        private readonly NumericUpDown _AutoUnlockTimeSpinner;
+        private readonly ToolStripButton _AutoUnlockButton;
+
+        private readonly Random _random = new Random();
+
+        //novo label do tryhard - conquistas mais demoradas
+        private readonly ToolStripLabel _AutoUnlockRandomLabel;
+        private readonly ToolStripControlHost _AutoUnlockRandomMinHost;
+        private readonly NumericUpDown _AutoUnlockRandomMinSpinner;
+        private readonly ToolStripLabel _AutoUnlockRandomToLabel;
+        private readonly ToolStripControlHost _AutoUnlockRandomMaxHost;
+        private readonly NumericUpDown _AutoUnlockRandomMaxSpinner;
+        private readonly ToolStripControlHost _TryHardCheckBoxHost;
+        private readonly CheckBox _TryHardCheckBox;
+        private readonly ToolStripLabel _GlobalStatsStatusLabel;
+
+
+
+        private bool _IsUpdatingAchievementList;
+
+        private CancellationTokenSource _AutoUnlockCts;
+
+        private bool _ShowLocked = true;
+        private bool _ShowUnlocked = true;
+        private string _Filter = "";
+
+        private readonly List<Stats.AchievementInfo> _Achievements = new();
+
+        // Porcentagens globais de desbloqueio da Steam API
+        private readonly Dictionary<string, double> _GlobalPercentages = new Dictionary<string, double>(StringComparer.OrdinalIgnoreCase);
+        private readonly TaskCompletionSource<bool> _GlobalStatsReady = new TaskCompletionSource<bool>();
+        private static readonly System.Net.Http.HttpClient _StatsHttpClient;
+
+        static Manager()
+        {
+            // .NET Framework 4.8 não habilita TLS 1.2 por padrão — precisa ser setado
+            // ANTES da primeira requisição HTTPS, senão handshake falha silenciosamente.
+            System.Net.ServicePointManager.SecurityProtocol |=
+                System.Net.SecurityProtocolType.Tls12 | System.Net.SecurityProtocolType.Tls11;
+
+            _StatsHttpClient = new System.Net.Http.HttpClient
+            {
+                Timeout = TimeSpan.FromSeconds(15),
+            };
+            _StatsHttpClient.DefaultRequestHeaders.UserAgent.ParseAdd("AutoSAM-plus/7.0");
+        }
 
         public Manager(long gameId, API.Client client)
         {
             this.InitializeComponent();
+
+            this._AchievementListView.Sorting = SortOrder.None;
+
+            // Sempre abrir em 'locked'
+            this._DisplayLockedOnlyButton.Checked = true;
+            this._DisplayUnlockedOnlyButton.Checked = false;
+
+            this._UnlockCountdownLabel = new ToolStripLabel("");
+            this._ProgressBar = new ToolStripProgressBar
+            {
+                Name = "_ProgressBar",
+                Size = new Size(150, 16),
+                Style = ProgressBarStyle.Continuous,
+            };
+            int progressBarIndex = this._MainStatusStrip.Items.Count;
+            this._MainStatusStrip.Items.Add(this._UnlockCountdownLabel);
+            this._MainStatusStrip.Items.Add(this._ProgressBar);
+
+
+            // nova barra de ferramentas
+            var autoUnlockToolStrip = new ToolStrip();
+
+            // -- Controles de Tempo Base --
+            this._AutoUnlockLabel = new ToolStripLabel("Auto (minutes):");
+            this._AutoUnlockTimeSpinner = new NumericUpDown { Width = 50, Minimum = 1, Maximum = 999, Value = 1 };
+            this._AutoUnlockTimeHost = new ToolStripControlHost(this._AutoUnlockTimeSpinner);
+            this._AutoUnlockButton = new ToolStripButton("Start Auto");
+            this._AutoUnlockButton.Click += this.OnAutoUnlock;
+
+            // -- Controles de Tempo Aleatório --
+            this._AutoUnlockRandomLabel = new ToolStripLabel("Random (sec):");
+            this._AutoUnlockRandomMinSpinner = new NumericUpDown { Width = 50, Minimum = 0, Maximum = 9999, Value = 30 };
+            this._AutoUnlockRandomMinHost = new ToolStripControlHost(this._AutoUnlockRandomMinSpinner);
+            this._AutoUnlockRandomToLabel = new ToolStripLabel(" to ");
+            this._AutoUnlockRandomMaxSpinner = new NumericUpDown { Width = 50, Minimum = 0, Maximum = 9999, Value = 180 };
+            this._AutoUnlockRandomMaxHost = new ToolStripControlHost(this._AutoUnlockRandomMaxSpinner);
+
+            // -- Checkbox do Modo Tryhard --
+            this._TryHardCheckBox = new CheckBox { Text = "minutes Mode", AutoSize = true, BackColor = Color.Transparent };
+            this._TryHardCheckBox.CheckedChanged += this.OnTryHardCheckedChanged;
+            this._TryHardCheckBoxHost = new ToolStripControlHost(this._TryHardCheckBox) { 
+                Margin = new Padding(10, 0, 0, 0) 
+            };
+
+            // -- Label de status do fetch global --
+            this._GlobalStatsStatusLabel = new ToolStripLabel("⏳ Fetching global stats...")
+            {
+                ForeColor = Color.Gray,
+                Margin = new Padding(10, 0, 0, 0),
+            };
+
+            // Adiciona todos os controles de automação à nova barra de ferramentas
+            autoUnlockToolStrip.Items.AddRange(new ToolStripItem[] {
+                this._AutoUnlockLabel,
+                this._AutoUnlockTimeHost,
+                this._AutoUnlockButton,
+                new ToolStripSeparator(),
+                this._AutoUnlockRandomLabel,
+                this._AutoUnlockRandomMinHost,
+                this._AutoUnlockRandomToLabel,
+                this._AutoUnlockRandomMaxHost,
+                this._TryHardCheckBoxHost,
+                this._GlobalStatsStatusLabel,
+            });
+
+            // Encaixa a nova barra no topo da aba
+            autoUnlockToolStrip.Dock = DockStyle.Top;
+
+            // Adiciona a nova barra de ferramentas à aba de conquistas
+            this._AchievementsTabPage.Controls.Add(autoUnlockToolStrip);
+
+            // Garante que a barra de ferramentas original fique no topo (acima da nova)
+            //this._AchievementsToolStrip.BringToFront();
+
+
+            this._AchievementListView.AllowDrop = true;
+            this._AchievementListView.ItemDrag += this.OnAchievementItemDrag;
+            this._AchievementListView.DragEnter += this.OnAchievementDragEnter;
+            this._AchievementListView.DragDrop += this.OnAchievementDragDrop;
 
             this._MainTabControl.SelectedTab = this._AchievementsTabPage;
             //this.statisticsList.Enabled = this.checkBox1.Checked;
@@ -88,6 +226,7 @@ namespace SAM.Game
 
             this._IconDownloader.DownloadDataCompleted += this.OnIconDownload;
 
+            base.Text = "AutoSAM-plus.Game 7.0";
             string name = this._SteamClient.SteamApps001.GetAppData((uint)this._GameId, "name");
             if (name != null)
             {
@@ -101,9 +240,10 @@ namespace SAM.Game
             this._UserStatsReceivedCallback = client.CreateAndRegisterCallback<API.Callbacks.UserStatsReceived>();
             this._UserStatsReceivedCallback.OnRun += this.OnUserStatsReceived;
 
-            //this.UserStatsStoredCallback = new API.Callback(1102, new API.Callback.CallbackFunction(this.OnUserStatsStored));
-
             this.RefreshStats();
+
+            // Busca porcentagens globais em paralelo (sem bloquear a UI)
+            var fetchTask = this.FetchGlobalAchievementPercentagesAsync();
         }
 
         private void AddAchievementIcon(Stats.AchievementInfo info, Image icon)
@@ -216,7 +356,7 @@ namespace SAM.Game
                     return false;
                 }
             }
-            catch (Exception e)
+            catch (Exception)
             {
                 return false;
             }
@@ -436,8 +576,6 @@ namespace SAM.Game
             this.DisableInput();
         }
 
-        private bool _IsUpdatingAchievementList;
-
         private void GetAchievements()
         {
             var textSearch = this._MatchingStringTextBox.Text.Length > 0
@@ -446,13 +584,13 @@ namespace SAM.Game
 
             this._IsUpdatingAchievementList = true;
 
-            this._AchievementListView.Items.Clear();
             this._AchievementListView.BeginUpdate();
-            //this.Achievements.Clear();
+            this._AchievementListView.Items.Clear();
 
             bool wantLocked = this._DisplayLockedOnlyButton.Checked == true;
             bool wantUnlocked = this._DisplayUnlockedOnlyButton.Checked == true;
 
+            var achievements = new List<Stats.AchievementInfo>();
             foreach (var def in this._AchievementDefinitions)
             {
                 if (string.IsNullOrEmpty(def.Id) == true)
@@ -463,35 +601,16 @@ namespace SAM.Game
                 if (this._SteamClient.SteamUserStats.GetAchievementAndUnlockTime(
                     def.Id,
                     out bool isAchieved,
-                    out var unlockTime) == false)
+                    out uint unlockTime) == false)
                 {
                     continue;
                 }
 
-                bool wanted = (wantLocked == false && wantUnlocked == false) || isAchieved switch
-                {
-                    true => wantUnlocked,
-                    false => wantLocked,
-                };
-                if (wanted == false)
-                {
-                    continue;
-                }
-
-                if (textSearch != null)
-                {
-                    if (def.Name.IndexOf(textSearch, StringComparison.OrdinalIgnoreCase) < 0 &&
-                        def.Description.IndexOf(textSearch, StringComparison.OrdinalIgnoreCase) < 0)
-                    {
-                        continue;
-                    }
-                }
-
-                Stats.AchievementInfo info = new()
+                var info = new Stats.AchievementInfo
                 {
                     Id = def.Id,
                     IsAchieved = isAchieved,
-                    UnlockTime = isAchieved == true && unlockTime > 0
+                    UnlockTime = isAchieved && unlockTime > 0
                         ? DateTimeOffset.FromUnixTimeSeconds(unlockTime).LocalDateTime
                         : null,
                     IconNormal = string.IsNullOrEmpty(def.IconNormal) ? null : def.IconNormal,
@@ -500,20 +619,81 @@ namespace SAM.Game
                     Name = def.Name,
                     Description = def.Description,
                 };
+                achievements.Add(info);
+            }
 
-                ListViewItem item = new()
+            // Ordenar por % global de desbloqueio (mais comum primeiro)
+            if (this._GlobalPercentages.Count > 0)
+            {
+                foreach (var a in achievements)
                 {
-                    Checked = isAchieved,
+                    if (this._GlobalPercentages.TryGetValue(a.Id, out double pct))
+                        a.GlobalPercent = pct;
+                }
+                achievements.Sort((x, y) => y.GlobalPercent.CompareTo(x.GlobalPercent));
+                this._GlobalStatsStatusLabel.Text = "✔ Sorted by popularity";
+                this._GlobalStatsStatusLabel.ForeColor = Color.LimeGreen;
+            }
+            else
+            {
+                this._GlobalStatsStatusLabel.Text = "⏳ Fetching global stats...";
+                this._GlobalStatsStatusLabel.ForeColor = Color.Gray;
+            }
+
+            if (achievements.Count > 0)
+            {
+                this._ProgressBar.Maximum = achievements.Count;
+                this._ProgressBar.Value = achievements.Count(a => a.IsAchieved);
+                this._ProgressBar.Visible = true;
+            }
+            else
+            {
+                this._ProgressBar.Visible = false;
+            }
+
+            var query = achievements.AsEnumerable();
+
+            if (wantLocked)
+            {
+                query = query.Where(a => a.IsAchieved == false);
+            }
+            else if (wantUnlocked)
+            {
+                query = query.Where(a => a.IsAchieved == true);
+            }
+
+            if (textSearch != null)
+            {
+                query = query.Where(
+                    a => a.Name.IndexOf(textSearch, StringComparison.OrdinalIgnoreCase) >= 0 ||
+                         a.Description.IndexOf(textSearch, StringComparison.OrdinalIgnoreCase) >= 0);
+            }
+
+            try
+            {
+                this._AchievementListView.Items.AddRange(query.Select(info =>
+                {
+                    string displayName = info.Name;
+                    if (info.GlobalPercent >= 0)
+                    {
+                        displayName = string.Format(CultureInfo.InvariantCulture, "[{0:0.0}%] {1}", info.GlobalPercent, info.Name);
+                    }
+
+                    var item = new ListViewItem
+                    {
+                        Checked = info.IsAchieved,
                     Tag = info,
-                    Text = info.Name,
-                    BackColor = (def.Permission & 3) == 0 ? Color.Black : Color.FromArgb(64, 0, 0),
+                    Text = displayName,
+                        BackColor = (info.Permission & 3) == 0 ? Color.Black : Color.FromArgb(64, 0, 0),
                 };
 
                 info.Item = item;
 
-                if (item.Text.StartsWith("#", StringComparison.InvariantCulture) == true)
+                if (info.Name.StartsWith("#", StringComparison.InvariantCulture) == true)
                 {
-                    item.Text = info.Id;
+                    item.Text = info.GlobalPercent >= 0
+                        ? string.Format(CultureInfo.InvariantCulture, "[{0:0.0}%] {1}", info.GlobalPercent, info.Id)
+                        : info.Id;
                     item.SubItems.Add("");
                 }
                 else
@@ -521,18 +701,19 @@ namespace SAM.Game
                     item.SubItems.Add(info.Description);
                 }
 
-                item.SubItems.Add(info.UnlockTime.HasValue == true
-                    ? info.UnlockTime.Value.ToString()
-                    : "");
+                    item.SubItems.Add(info.UnlockTime.HasValue ? info.UnlockTime.Value.ToString() : "");
 
                 info.ImageIndex = 0;
 
                 this.AddAchievementToIconQueue(info, false);
-                this._AchievementListView.Items.Add(item);
+                    return item;
+                }).ToArray());
             }
-
+            finally
+            {
             this._AchievementListView.EndUpdate();
-            this._IsUpdatingAchievementList = false;
+                this._AchievementListView.Sorting = SortOrder.None;
+            }
 
             this.DownloadNextIcon();
         }
@@ -728,6 +909,7 @@ namespace SAM.Game
             {
                 item.Checked = false;
             }
+            this.ForceGlobalAchievementsRefresh();
         }
 
         private void OnInvertAll(object sender, EventArgs e)
@@ -736,6 +918,7 @@ namespace SAM.Game
             {
                 item.Checked = !item.Checked;
             }
+            this.ForceGlobalAchievementsRefresh();
         }
 
         private void OnUnlockAll(object sender, EventArgs e)
@@ -744,6 +927,7 @@ namespace SAM.Game
             {
                 item.Checked = true;
             }
+            this.ForceGlobalAchievementsRefresh();
         }
 
         private bool Store()
@@ -863,12 +1047,12 @@ namespace SAM.Game
 
         private void OnCheckAchievement(object sender, ItemCheckEventArgs e)
         {
-            if (sender != this._AchievementListView)
+            if (this._IsUpdatingAchievementList)
             {
                 return;
             }
 
-            if (this._IsUpdatingAchievementList == true)
+            if (sender != this._AchievementListView)
             {
                 return;
             }
@@ -882,7 +1066,7 @@ namespace SAM.Game
             {
                 MessageBox.Show(
                     this,
-                    "Sorry, but this is a protected achievement and cannot be managed with Steam Achievement Manager.",
+                    "Sorry, but this is a protected achievement and cannot be managed with AutoSAM-plus.",
                     "Error",
                     MessageBoxButtons.OK,
                     MessageBoxIcon.Error);
@@ -910,9 +1094,452 @@ namespace SAM.Game
             this.GetAchievements();
         }
 
-        private void OnFilterUpdate(object sender, KeyEventArgs e)
+        private void OnFilterUpdate(object sender, System.EventArgs e)
         {
+            this.UpdateAchievements(this._DisplayLockedOnlyButton.Checked, this._DisplayUnlockedOnlyButton.Checked, this._MatchingStringTextBox.Text);
+        }
+
+        private void ToggleControls(bool enabled)
+        {
+            this._StoreButton.Enabled = enabled;
+            this._ReloadButton.Enabled = enabled;
+            this._ResetButton.Enabled = enabled;
+            this._LockAllButton.Enabled = enabled;
+            this._InvertAllButton.Enabled = enabled;
+            this._UnlockAllButton.Enabled = enabled;
+            this._AutoUnlockTimeHost.Enabled = enabled;
+            this._DisplayLockedOnlyButton.Enabled = enabled;
+            this._DisplayUnlockedOnlyButton.Enabled = enabled;
+            this._MatchingStringTextBox.Enabled = enabled;
+        }
+
+        private async void OnAutoUnlock(object sender, EventArgs e)
+        {
+            this._AutoUnlockButton.Text = "Stop Auto";
+            this._AutoUnlockButton.Click -= this.OnAutoUnlock;
+            this._AutoUnlockButton.Click += this.OnStopAutoUnlock;
+            this._AutoUnlockTimeSpinner.Enabled = false;
+
+            // Bloquear interações do usuário
+            this._AchievementListView.AllowDrop = false;
+            this._AchievementListView.ItemDrag -= this.OnAchievementItemDrag;
+            this._AchievementListView.DragEnter -= this.OnAchievementDragEnter;
+            this._AchievementListView.DragDrop -= this.OnAchievementDragDrop;
+
+            this._AutoUnlockCts = new CancellationTokenSource();
+            var token = this._AutoUnlockCts.Token;
+
+            // Garante que o fetch global terminou antes de começar — senão a "ordem por %"
+            // vira ordem original (todos GlobalPercent = -1).
+            if (this._GlobalStatsReady.Task.IsCompleted == false)
+            {
+                this._UnlockCountdownLabel.Text = "Waiting for global stats...";
+                var winner = await Task.WhenAny(this._GlobalStatsReady.Task, Task.Delay(15000, token));
+                if (winner != this._GlobalStatsReady.Task)
+                {
+                    var go = MessageBox.Show(
+                        this,
+                        "Global achievement stats are still loading.\nStart anyway in original order?",
+                        "Stats not ready",
+                        MessageBoxButtons.YesNo,
+                        MessageBoxIcon.Question);
+                    if (go == DialogResult.No)
+                    {
+                        this._AutoUnlockButton.Text = "Start Auto";
+                        this._AutoUnlockButton.Click -= this.OnStopAutoUnlock;
+                        this._AutoUnlockButton.Click += this.OnAutoUnlock;
+                        this._AutoUnlockTimeSpinner.Enabled = true;
+                        this._UnlockCountdownLabel.Text = "";
+                        return;
+                    }
+                }
+                else if (this._GlobalStatsReady.Task.Result)
+                {
+                    // Re-renderiza para aplicar a ordem por % no ListView visível
+                    this.GetAchievements();
+                }
+                this._UnlockCountdownLabel.Text = "";
+            }
+
+
+
+
+
+
+
+
+
+            try
+            {
+
+
+                
+
+
+                int delay = (int)this._AutoUnlockTimeSpinner.Value * 60 * 1000;
+                if (delay <= 0)
+                {
+                    MessageBox.Show("Auto time must be greater than zero.", "Invalid Time", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                    return;
+                }
+
+
+                // Pega os valores mínimo e máximo para o tempo aleatório
+                int minRandom = (int)this._AutoUnlockRandomMinSpinner.Value;
+                int maxRandom = (int)this._AutoUnlockRandomMaxSpinner.Value;
+
+                //minRandom >maxRandom? swap
+                if (minRandom > maxRandom)
+                {
+                    var temp = minRandom;
+                    minRandom = maxRandom;
+                    maxRandom = temp;
+                }
+
+                int randomExtraMs;
+
+
+
+                // Check tryhard
+                if (_TryHardCheckBox.Checked)
+                {
+                    // Converte os minutos do intervalo aleatório para milissegundos
+                    int minRandomMs = minRandom * 60 * 1000;
+                    int maxRandomMs = (maxRandom + 1) * 60 * 1000; // +1 para tornar o máximo inclusivo
+                    randomExtraMs = _random.Next(minRandomMs, maxRandomMs);
+                }
+                else
+                {
+                    // Converte os segundos do intervalo aleatório para milissegundos
+                    int minRandomMs = minRandom * 1000;
+                    int maxRandomMs = (maxRandom + 1) * 1000; // +1 para tornar o máximo inclusivo
+                    randomExtraMs = _random.Next(minRandomMs, maxRandomMs);
+                }
+                //end check tryhard
+                int finalDelayMs = delay + randomExtraMs;
+
+                // Ordena por % global (mais comum primeiro) se disponível, senão mantém ordem visual
+                var itemsToUnlock = this._AchievementListView.Items.Cast<ListViewItem>()
+                    .Where(item => !((AchievementInfo)item.Tag).IsAchieved)
+                    .OrderByDescending(item => ((AchievementInfo)item.Tag).GlobalPercent)
+                    .ToList();
+
+                foreach (var item in itemsToUnlock)
+                {
+                    if (token.IsCancellationRequested)
+                        break;
+
+                    var info = (AchievementInfo)item.Tag;
+
+                    // Timer visual com delay
+                    int totalSecondsForCountdown = finalDelayMs / 1000;
+                    for (int s = totalSecondsForCountdown; s > 0; s--)
+                    {
+                        int h = s / 3600;
+                        int m = (s % 3600) / 60;
+                        int sec = s % 60;
+                        SafeUIAction(() => this._UnlockCountdownLabel.Text = string.Format("{0:D2}:{1:D2}:{2:D2}", h, m, sec));
+                        await Task.Delay(1000, token);
+                    }
+                    SafeUIAction(() => this._UnlockCountdownLabel.Text = "00:00:00");
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+                    try
+                    {
+                        if (this._SteamClient.SteamUserStats.SetAchievement(info.Id, true) &&
+                            this._SteamClient.SteamUserStats.StoreStats())
+                        {
+                            // Consultar o estado real da conquista na API
+                            bool isAchieved;
+                            uint unlockTime;
+                            if (this._SteamClient.SteamUserStats.GetAchievementAndUnlockTime(info.Id, out isAchieved, out unlockTime))
+                            {
+                                info.IsAchieved = isAchieved;
+                                info.UnlockTime = isAchieved && unlockTime > 0
+                                    ? DateTimeOffset.FromUnixTimeSeconds(unlockTime).LocalDateTime
+                                    : null;
+
+                                // Atualizar a lista centralizada
+                                var central = this._Achievements.FirstOrDefault(a => a.Id == info.Id);
+                                if (central != null)
+                                {
+                                    central.IsAchieved = info.IsAchieved;
+                                    central.UnlockTime = info.UnlockTime;
+                                }
+                            }
+                            else
+                            {
+                                // fallback: marcar como achieved
+                                info.IsAchieved = true;
+                            }
+
+                            if (this._ProgressBar.Value < this._ProgressBar.Maximum)
+                                this._ProgressBar.Value++;
+
+                            // Atualização sutil: remove só o item desbloqueado ou marca como checked
+                            if (this._DisplayLockedOnlyButton.Checked && !this._DisplayUnlockedOnlyButton.Checked)
+                            {
+                                SafeUIAction(() => {
+                                    this._AchievementListView.Items.Remove(item);
+                                    if (this._AchievementListView.Items.Count == 0)
+                                    {
+                                        var emptyItem = new ListViewItem("Nenhuma conquista restante") { ForeColor = Color.Gray };
+                                        this._AchievementListView.Items.Add(emptyItem);
+                                    }
+                                });
+                            }
+                            else
+                            {
+                                SafeUIAction(() => {
+                                    item.Checked = true;
+                                    item.EnsureVisible();
+                                });
+                            }
+                        }
+                        else
+                        {
+                            MessageBox.Show($"Failed to unlock achievement: {info.Name}.", "Error", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                            break;
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        MessageBox.Show($"Erro ao desbloquear conquista: {info.Name}\n{ex.Message}", "Erro", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                        break;
+                    }
+                }
+
+                if (!token.IsCancellationRequested)
+                {
+                    MessageBox.Show("All achievements have been unlocked.", "Auto-Unlock Complete", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                }
+            }
+            catch (OperationCanceledException)
+            {
+                // Cancelado pelo usuário
+            }
+            finally
+            {
+                this._AutoUnlockButton.Text = "Start Auto";
+                this._AutoUnlockButton.Click -= this.OnStopAutoUnlock;
+                this._AutoUnlockButton.Click += this.OnAutoUnlock;
+                this._AutoUnlockTimeSpinner.Enabled = true;
+                SafeUIAction(() => {
+                    this._AchievementListView.AllowDrop = true;
+                    this._AchievementListView.ItemDrag += this.OnAchievementItemDrag;
+                    this._AchievementListView.DragEnter += this.OnAchievementDragEnter;
+                    this._AchievementListView.DragDrop += this.OnAchievementDragDrop;
+                });
+                SafeUIAction(() => this._UnlockCountdownLabel.Text = "");
+
+                if (this._AutoUnlockCts != null)
+                {
+                    this._AutoUnlockCts.Dispose();
+                    this._AutoUnlockCts = null;
+                }
+                this.ForceGlobalAchievementsRefresh();
+            }
+        }
+
+        private void OnStopAutoUnlock(object sender, EventArgs e)
+        {
+            if (this._AutoUnlockCts != null)
+            {
+                this._AutoUnlockCts.Cancel();
+            }
+        }
+
+        private void OnAchievementItemDrag(object sender, ItemDragEventArgs e)
+        {
+            this._AchievementListView.DoDragDrop(e.Item, DragDropEffects.Move);
+        }
+
+        private void OnAchievementDragEnter(object sender, DragEventArgs e)
+        {
+            e.Effect = DragDropEffects.Move;
+        }
+
+        private void OnAchievementDragDrop(object sender, DragEventArgs e)
+        {
+            if (e.Data.GetData(typeof(ListViewItem)) is ListViewItem draggedItem)
+            {
+                var dropPoint = this._AchievementListView.PointToClient(new Point(e.X, e.Y));
+                var dropItem = this._AchievementListView.GetItemAt(dropPoint.X, dropPoint.Y);
+
+                if (dropItem != null)
+                {
+                    var dropIndex = dropItem.Index;
+                    this._AchievementListView.Items.Remove(draggedItem);
+                    this._AchievementListView.Items.Insert(dropIndex, draggedItem);
+                }
+            }
+        }
+
+        private void UpdateAchievements(bool showLocked, bool showUnlocked, string filter)
+        {
+            this._ShowLocked = showLocked;
+            this._ShowUnlocked = showUnlocked;
+            this._Filter = filter;
+
             this.GetAchievements();
+        }
+
+        // Garante que ações de UI ocorram na thread principal
+        private void SafeUIAction(Action a)
+        {
+            if (this.InvokeRequired)
+                this.Invoke(a);
+            else
+                a();
+        }
+
+        private void Manager_Load(object sender, EventArgs e)
+        {
+
+        }
+
+        private void OnTabChanged(object sender, EventArgs e)
+        {
+            if (this._MainTabControl.SelectedTab == this._AchievementsTabPage)
+            {
+                this.ForceGlobalAchievementsRefresh();
+            }
+        }
+
+        /// <summary>
+        /// Força atualização global das conquistas a partir do backend Steam e atualiza a interface.
+        /// </summary>
+        private void ForceGlobalAchievementsRefresh()
+        {
+            SafeUIAction(() =>
+            {
+                // Recarrega o estado das conquistas do Steam
+                this._Achievements.Clear();
+                foreach (var def in this._AchievementDefinitions)
+                {
+                    if (string.IsNullOrEmpty(def.Id))
+                        continue;
+                    if (this._SteamClient.SteamUserStats.GetAchievementAndUnlockTime(
+                        def.Id,
+                        out bool isAchieved,
+                        out uint unlockTime) == false)
+                        continue;
+                    var info = new Stats.AchievementInfo
+                    {
+                        Id = def.Id,
+                        IsAchieved = isAchieved,
+                        UnlockTime = isAchieved && unlockTime > 0
+                            ? DateTimeOffset.FromUnixTimeSeconds(unlockTime).LocalDateTime
+                            : null,
+                        IconNormal = string.IsNullOrEmpty(def.IconNormal) ? null : def.IconNormal,
+                        IconLocked = string.IsNullOrEmpty(def.IconLocked) ? def.IconNormal : def.IconLocked,
+                        Permission = def.Permission,
+                        Name = def.Name,
+                        Description = def.Description,
+                    };
+                    this._Achievements.Add(info);
+                }
+                // Atualiza a interface
+                this.UpdateAchievements(
+                    this._DisplayLockedOnlyButton.Checked,
+                    this._DisplayUnlockedOnlyButton.Checked,
+                    this._MatchingStringTextBox.Text);
+            });
+        }
+
+
+
+
+        // Busca porcentagens globais de desbloqueio na Steam Web API pública
+        private async Task FetchGlobalAchievementPercentagesAsync()
+        {
+            try
+            {
+                // format=json é o padrão atual, mas explicitar evita surpresa caso a Steam mude
+                var url = $"https://api.steampowered.com/ISteamUserStats/GetGlobalAchievementPercentagesForApp/v0002/?gameid={this._GameId}&format=json";
+                var json = await _StatsHttpClient.GetStringAsync(url).ConfigureAwait(false);
+
+                // A Steam retorna "percent":"50.0" (string com aspas) — o ""? torna a aspa opcional
+                // para tolerar tanto formato string quanto numérico.
+                var matches = System.Text.RegularExpressions.Regex.Matches(
+                    json,
+                    @"""name""\s*:\s*""([^""]+)""\s*,\s*""percent""\s*:\s*""?([\d.]+)""?");
+
+                foreach (System.Text.RegularExpressions.Match m in matches)
+                {
+                    if (double.TryParse(m.Groups[2].Value,
+                        System.Globalization.NumberStyles.Float,
+                        System.Globalization.CultureInfo.InvariantCulture,
+                        out double pct))
+                    {
+                        this._GlobalPercentages[m.Groups[1].Value] = pct;
+                    }
+                }
+
+                bool ok = this._GlobalPercentages.Count > 0;
+                this._GlobalStatsReady.TrySetResult(ok);
+
+                this.SafeUIAction(() =>
+                {
+                    if (ok)
+                    {
+                        // Re-renderiza se as conquistas já estiverem na tela
+                        if (this._AchievementListView.Items.Count > 0)
+                        {
+                            this._GameStatusLabel.Text = "Sorting by global popularity...";
+                            this.GetAchievements();
+                        }
+                    }
+                    else
+                    {
+                        // HTTP funcionou mas regex não casou nada — formato pode ter mudado
+                        this._GlobalStatsStatusLabel.Text = "⚠ No global stats parsed";
+                        this._GlobalStatsStatusLabel.ForeColor = Color.OrangeRed;
+                    }
+                });
+            }
+            catch (Exception ex)
+            {
+                this._GlobalStatsReady.TrySetResult(false);
+                this.SafeUIAction(() =>
+                {
+                    this._GlobalStatsStatusLabel.Text = "⚠ Global stats unavailable";
+                    this._GlobalStatsStatusLabel.ForeColor = Color.OrangeRed;
+                    this._GlobalStatsStatusLabel.ToolTipText = ex.Message;
+                });
+            }
+        }
+
+        //metodo tryhard ---> forçar um random maior (30 minutos a 180 minutos)
+        private void OnTryHardCheckedChanged(object sender, EventArgs e)
+        {
+            if (_TryHardCheckBox.Checked)
+            {
+                // Se o modo "Tryhard" estiver ativo, muda a label para minutos e define os valores
+                _AutoUnlockRandomLabel.Text = "Random (min):";
+                _AutoUnlockRandomMinSpinner.Value = 30;
+                _AutoUnlockRandomMaxSpinner.Value = 180;
+            }
+            else
+            {
+                // Se estiver desativado, volta para segundos
+                _AutoUnlockRandomLabel.Text = "Random (sec):";
+                _AutoUnlockRandomMinSpinner.Value = 30;
+                _AutoUnlockRandomMaxSpinner.Value = 180;
+            }
         }
     }
 }

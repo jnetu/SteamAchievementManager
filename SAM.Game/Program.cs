@@ -20,9 +20,16 @@
  *    distribution.
  */
 
+/*
+ * Modificações e melhorias por: https://github.com/olucasmf (PT-BR)
+ * Modifications and improvements by: https://github.com/olucasmf (EN)
+ */
+
 using System;
 using System.Diagnostics;
+using System.IO;
 using System.Windows.Forms;
+using System.Reflection;
 
 namespace SAM.Game
 {
@@ -31,11 +38,22 @@ namespace SAM.Game
         [STAThread]
         public static void Main(string[] args)
         {
+            AppDomain.CurrentDomain.AssemblyResolve += (sender, eventArgs) =>
+            {
+                string dllName = new AssemblyName(eventArgs.Name).Name + ".dll";
+                string dllPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "dlls", dllName);
+                if (File.Exists(dllPath))
+                {
+                    return Assembly.LoadFrom(dllPath);
+                }
+                return null;
+            };
+
             long appId;
 
             if (args.Length == 0)
             {
-                Process.Start("SAM.Picker.exe");
+                Process.Start(Path.Combine(Application.StartupPath, "SAM.Picker.exe"));
                 return;
             }
 
@@ -71,7 +89,7 @@ namespace SAM.Game
                     {
                         MessageBox.Show(
                             "Steam is not running. Please start Steam then run this tool again.\n\n" +
-                            "If you have the game through Family Share, the game may be locked due to\n" +
+                            "If you have the game through Family Share, the game may be locked due to\n\n" +
                             "the Family Share account actively playing a game.\n\n" +
                             "(" + e.Message + ")",
                             "Error",

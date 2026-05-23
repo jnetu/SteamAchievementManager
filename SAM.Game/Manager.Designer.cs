@@ -137,7 +137,7 @@
             this._CountryStatusLabel,
             this._GameStatusLabel,
             this._DownloadStatusLabel});
-            this._MainStatusStrip.Location = new System.Drawing.Point(0, 370);
+            this._MainStatusStrip.Location = new System.Drawing.Point(0, 409);
             this._MainStatusStrip.Name = "_MainStatusStrip";
             this._MainStatusStrip.Size = new System.Drawing.Size(712, 22);
             this._MainStatusStrip.TabIndex = 4;
@@ -150,7 +150,7 @@
             // _GameStatusLabel
             // 
             this._GameStatusLabel.Name = "_GameStatusLabel";
-            this._GameStatusLabel.Size = new System.Drawing.Size(555, 17);
+            this._GameStatusLabel.Size = new System.Drawing.Size(697, 17);
             this._GameStatusLabel.Spring = true;
             this._GameStatusLabel.TextAlign = System.Drawing.ContentAlignment.MiddleLeft;
             // 
@@ -177,8 +177,9 @@
             this._MainTabControl.Location = new System.Drawing.Point(8, 33);
             this._MainTabControl.Name = "_MainTabControl";
             this._MainTabControl.SelectedIndex = 0;
-            this._MainTabControl.Size = new System.Drawing.Size(696, 334);
+            this._MainTabControl.Size = new System.Drawing.Size(696, 373);
             this._MainTabControl.TabIndex = 5;
+            this._MainTabControl.SelectedIndexChanged += new System.EventHandler(this.OnTabChanged);
             // 
             // _AchievementsTabPage
             // 
@@ -187,7 +188,7 @@
             this._AchievementsTabPage.Location = new System.Drawing.Point(4, 22);
             this._AchievementsTabPage.Name = "_AchievementsTabPage";
             this._AchievementsTabPage.Padding = new System.Windows.Forms.Padding(3);
-            this._AchievementsTabPage.Size = new System.Drawing.Size(688, 308);
+            this._AchievementsTabPage.Size = new System.Drawing.Size(688, 347);
             this._AchievementsTabPage.TabIndex = 0;
             this._AchievementsTabPage.Text = "Achievements";
             this._AchievementsTabPage.UseVisualStyleBackColor = true;
@@ -210,7 +211,7 @@
             this._AchievementListView.LargeImageList = this._AchievementImageList;
             this._AchievementListView.Location = new System.Drawing.Point(3, 28);
             this._AchievementListView.Name = "_AchievementListView";
-            this._AchievementListView.Size = new System.Drawing.Size(682, 277);
+            this._AchievementListView.Size = new System.Drawing.Size(682, 316);
             this._AchievementListView.SmallImageList = this._AchievementImageList;
             this._AchievementListView.Sorting = System.Windows.Forms.SortOrder.Ascending;
             this._AchievementListView.TabIndex = 4;
@@ -333,7 +334,7 @@
             this._StatisticsTabPage.Location = new System.Drawing.Point(4, 22);
             this._StatisticsTabPage.Name = "_StatisticsTabPage";
             this._StatisticsTabPage.Padding = new System.Windows.Forms.Padding(3);
-            this._StatisticsTabPage.Size = new System.Drawing.Size(688, 308);
+            this._StatisticsTabPage.Size = new System.Drawing.Size(688, 347);
             this._StatisticsTabPage.TabIndex = 1;
             this._StatisticsTabPage.Text = "Statistics";
             this._StatisticsTabPage.UseVisualStyleBackColor = true;
@@ -371,14 +372,15 @@
             // 
             this.AutoScaleDimensions = new System.Drawing.SizeF(6F, 13F);
             this.AutoScaleMode = System.Windows.Forms.AutoScaleMode.Font;
-            this.ClientSize = new System.Drawing.Size(712, 392);
-            this.Controls.Add(this._MainToolStrip);
+            this.ClientSize = new System.Drawing.Size(712, 431);
             this.Controls.Add(this._MainTabControl);
+            this.Controls.Add(this._MainToolStrip);
             this.Controls.Add(this._MainStatusStrip);
             this.Icon = ((System.Drawing.Icon)(resources.GetObject("$this.Icon")));
             this.MinimumSize = new System.Drawing.Size(640, 50);
             this.Name = "Manager";
-            this.Text = "Steam Achievement Manager 7.0";
+            this.Text = "AutoSAM 7.0";
+            this.Load += new System.EventHandler(this.Manager_Load);
             this._MainToolStrip.ResumeLayout(false);
             this._MainToolStrip.PerformLayout();
             this._MainStatusStrip.ResumeLayout(false);

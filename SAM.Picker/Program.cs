@@ -22,6 +22,8 @@
 
 using System;
 using System.Windows.Forms;
+using System.Reflection;
+using System.IO;
 
 namespace SAM.Picker
 {
@@ -30,6 +32,17 @@ namespace SAM.Picker
         [STAThread]
         private static void Main()
         {
+            AppDomain.CurrentDomain.AssemblyResolve += (sender, eventArgs) =>
+            {
+                string dllName = new AssemblyName(eventArgs.Name).Name + ".dll";
+                string dllPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "dlls", dllName);
+                if (File.Exists(dllPath))
+                {
+                    return Assembly.LoadFrom(dllPath);
+                }
+                return null;
+            };
+
             if (API.Steam.GetInstallPath() == Application.StartupPath)
             {
                 MessageBox.Show(
