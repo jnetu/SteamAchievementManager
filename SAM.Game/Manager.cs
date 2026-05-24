@@ -80,6 +80,12 @@ namespace SAM.Game
         private readonly CheckBox _TryHardCheckBox;
         private readonly ToolStripLabel _GlobalStatsStatusLabel;
 
+        // Complete-in: usuário digita horas totais, app calcula o intervalo por conquista
+        private readonly ToolStripLabel _CompleteInLabel;
+        private readonly NumericUpDown _CompleteInHoursSpinner;
+        private readonly ToolStripControlHost _CompleteInHoursHost;
+        private readonly ToolStripButton _CompleteInApplyButton;
+
 
 
         private bool _IsUpdatingAchievementList;
@@ -158,6 +164,21 @@ namespace SAM.Game
                 Margin = new Padding(10, 0, 0, 0) 
             };
 
+            // -- Controles Complete-in --
+            this._CompleteInLabel = new ToolStripLabel("Complete in (h):");
+            this._CompleteInHoursSpinner = new NumericUpDown
+            {
+                Width = 55,
+                Minimum = 0,
+                Maximum = 9999,
+                Value = 0,
+            };
+            this._CompleteInHoursHost = new ToolStripControlHost(this._CompleteInHoursSpinner);
+            this._CompleteInApplyButton = new ToolStripButton("Apply");
+            this._CompleteInApplyButton.Click += this.OnApplyCompleteIn;
+            this._CompleteInApplyButton.ToolTipText =
+                "Calculate base interval from hours / remaining locked achievements and update the Auto (minutes) spinner.";
+
             // -- Label de status do fetch global --
             this._GlobalStatsStatusLabel = new ToolStripLabel("⏳ Fetching global stats...")
             {
@@ -176,6 +197,10 @@ namespace SAM.Game
                 this._AutoUnlockRandomToLabel,
                 this._AutoUnlockRandomMaxHost,
                 this._TryHardCheckBoxHost,
+                new ToolStripSeparator(),
+                this._CompleteInLabel,
+                this._CompleteInHoursHost,
+                this._CompleteInApplyButton,
                 this._GlobalStatsStatusLabel,
             });
 
@@ -1176,19 +1201,9 @@ namespace SAM.Game
                 
 
 
-                int delay = (int)this._AutoUnlockTimeSpinner.Value * 60 * 1000;
-                if (delay <= 0)
-                {
-                    MessageBox.Show("Auto time must be greater than zero.", "Invalid Time", MessageBoxButtons.OK, MessageBoxIcon.Warning);
-                    return;
-                }
-
-
-                // Pega os valores mínimo e máximo para o tempo aleatório
+                // Lê o random do usuário uma vez (validação só) — pode ser usado em qualquer dos dois modos
                 int minRandom = (int)this._AutoUnlockRandomMinSpinner.Value;
                 int maxRandom = (int)this._AutoUnlockRandomMaxSpinner.Value;
-
-                //minRandom >maxRandom? swap
                 if (minRandom > maxRandom)
                 {
                     var temp = minRandom;
@@ -1196,27 +1211,36 @@ namespace SAM.Game
                     maxRandom = temp;
                 }
 
-                int randomExtraMs;
+                // Detecta modo Complete-in (horas > 0). Em modo normal mantém comportamento existente.
+                double completeInHours = (double)this._CompleteInHoursSpinner.Value;
+                bool completeInMode = completeInHours > 0;
 
-
-
-                // Check tryhard
-                if (_TryHardCheckBox.Checked)
+                // Modo normal: delay one-shot (uma rolagem de random vale pra todas)
+                int oneShotFinalDelayMs = 0;
+                if (completeInMode == false)
                 {
-                    // Converte os minutos do intervalo aleatório para milissegundos
-                    int minRandomMs = minRandom * 60 * 1000;
-                    int maxRandomMs = (maxRandom + 1) * 60 * 1000; // +1 para tornar o máximo inclusivo
-                    randomExtraMs = _random.Next(minRandomMs, maxRandomMs);
+                    int delay = (int)this._AutoUnlockTimeSpinner.Value * 60 * 1000;
+                    if (delay <= 0)
+                    {
+                        MessageBox.Show("Auto time must be greater than zero.", "Invalid Time", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                        return;
+                    }
+
+                    int randomExtraMs;
+                    if (_TryHardCheckBox.Checked)
+                    {
+                        int minRandomMs = minRandom * 60 * 1000;
+                        int maxRandomMs = (maxRandom + 1) * 60 * 1000;
+                        randomExtraMs = _random.Next(minRandomMs, maxRandomMs);
+                    }
+                    else
+                    {
+                        int minRandomMs = minRandom * 1000;
+                        int maxRandomMs = (maxRandom + 1) * 1000;
+                        randomExtraMs = _random.Next(minRandomMs, maxRandomMs);
+                    }
+                    oneShotFinalDelayMs = delay + randomExtraMs;
                 }
-                else
-                {
-                    // Converte os segundos do intervalo aleatório para milissegundos
-                    int minRandomMs = minRandom * 1000;
-                    int maxRandomMs = (maxRandom + 1) * 1000; // +1 para tornar o máximo inclusivo
-                    randomExtraMs = _random.Next(minRandomMs, maxRandomMs);
-                }
-                //end check tryhard
-                int finalDelayMs = delay + randomExtraMs;
 
                 // Ordena por % global (mais comum primeiro) se disponível, senão mantém ordem visual
                 var itemsToUnlock = this._AchievementListView.Items.Cast<ListViewItem>()
@@ -1230,6 +1254,41 @@ namespace SAM.Game
                         break;
 
                     var info = (AchievementInfo)item.Tag;
+
+                    // Cálculo do delay desta iteração
+                    int finalDelayMs;
+                    if (completeInMode)
+                    {
+                        // Recalcula a cada conquista — adapta se a lista mudar durante o run
+                        int remainingNow = this.CountVisibleLockedAchievements();
+                        if (remainingNow < 1) remainingNow = 1;
+
+                        double targetMsPerAch = (completeInHours * 3600000.0) / remainingNow;
+
+                        // Random bidirecional: ± em torno do target pra média bater com o alvo total
+                        double unit = this._TryHardCheckBox.Checked ? 60000.0 : 1000.0;
+                        double halfRange = ((maxRandom - minRandom) / 2.0) * unit;
+
+                        // Teto: random não pode passar de 50% do target (senão dominaria o base)
+                        double maxHalfRange = targetMsPerAch * 0.5;
+                        if (halfRange > maxHalfRange) halfRange = maxHalfRange;
+
+                        int variation = halfRange >= 1
+                            ? this._random.Next(-(int)halfRange, (int)halfRange + 1)
+                            : 0;
+                        double delayMs = targetMsPerAch + variation;
+
+                        // Piso: 10% do target — permite raros desbloqueios próximos sem virar rajada
+                        double floorMs = Math.Max(1000.0, targetMsPerAch * 0.1);
+                        if (delayMs < floorMs) delayMs = floorMs;
+                        if (delayMs > int.MaxValue) delayMs = int.MaxValue;
+
+                        finalDelayMs = (int)delayMs;
+                    }
+                    else
+                    {
+                        finalDelayMs = oneShotFinalDelayMs;
+                    }
 
                     // Timer visual com delay
                     int totalSecondsForCountdown = finalDelayMs / 1000;
@@ -1521,6 +1580,69 @@ namespace SAM.Game
                     this._GlobalStatsStatusLabel.ToolTipText = ex.Message;
                 });
             }
+        }
+
+        // Conta conquistas ainda travadas e visíveis no ListView atual
+        private int CountVisibleLockedAchievements()
+        {
+            int n = 0;
+            foreach (ListViewItem item in this._AchievementListView.Items)
+            {
+                if (item.Tag is Stats.AchievementInfo info && info.IsAchieved == false)
+                {
+                    n++;
+                }
+            }
+            return n;
+        }
+
+        // Apply do "Complete in": calcula intervalo base e preenche o spinner Auto (minutes).
+        // No runtime, OnAutoUnlock detecta hours>0 e usa o valor exato (não arredondado).
+        private void OnApplyCompleteIn(object sender, EventArgs e)
+        {
+            double hours = (double)this._CompleteInHoursSpinner.Value;
+            if (hours <= 0)
+            {
+                MessageBox.Show(
+                    this,
+                    "Set hours > 0 to enable Complete-in mode.\n0 = keep using the manual Auto (minutes) value.",
+                    "Complete-in",
+                    MessageBoxButtons.OK,
+                    MessageBoxIcon.Information);
+                return;
+            }
+
+            int remaining = this.CountVisibleLockedAchievements();
+            if (remaining <= 0)
+            {
+                MessageBox.Show(
+                    this,
+                    "No locked achievements visible in the list — load a game or clear filters first.",
+                    "Complete-in",
+                    MessageBoxButtons.OK,
+                    MessageBoxIcon.Warning);
+                return;
+            }
+
+            double baseMinutes = (hours * 60.0) / remaining;
+
+            // Spinner é inteiro 1..999 — pode estourar pra cima ou pra baixo, só usamos como feedback visual.
+            decimal asDecimal = (decimal)Math.Round(baseMinutes);
+            if (asDecimal < this._AutoUnlockTimeSpinner.Minimum) asDecimal = this._AutoUnlockTimeSpinner.Minimum;
+            if (asDecimal > this._AutoUnlockTimeSpinner.Maximum) asDecimal = this._AutoUnlockTimeSpinner.Maximum;
+            this._AutoUnlockTimeSpinner.Value = asDecimal;
+
+            string baseHuman = baseMinutes >= 1
+                ? string.Format(CultureInfo.InvariantCulture, "{0:0.0} min/achievement", baseMinutes)
+                : string.Format(CultureInfo.InvariantCulture, "{0:0.0} sec/achievement", baseMinutes * 60.0);
+
+            MessageBox.Show(
+                this,
+                $"~{baseHuman} for {remaining} remaining over {hours}h.\n\n" +
+                "Runtime uses the precise (sub-minute) interval and applies random as ± variation around the target, so total time stays close to your goal.",
+                "Complete-in applied",
+                MessageBoxButtons.OK,
+                MessageBoxIcon.Information);
         }
 
         //metodo tryhard ---> forçar um random maior (30 minutos a 180 minutos)
